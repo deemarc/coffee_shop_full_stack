@@ -1,14 +1,14 @@
 import json
-from flask import request, _request_ctx_stack
+from flask import request, _request_ctx_stack,current_app, abort
 from functools import wraps
 from jose import jwt
 from urllib.request import urlopen
 
 
-AUTH0_DOMAIN = 'udacity-fsnd.auth0.com'
+AUTH0_DOMAIN = 'dev-fsnd-deemarc.us.auth0.com'
 ALGORITHMS = ['RS256']
-API_AUDIENCE = 'dev'
-
+API_AUDIENCE = 'coffee'
+AUTH0_CLIENT_ID = "Tr6uWTVDTfnhsq6TDFw37ltT1JAE2o22"
 ## AuthError Exception
 '''
 AuthError Exception
@@ -16,6 +16,9 @@ A standardized way to communicate auth failure modes
 '''
 class AuthError(Exception):
     def __init__(self, error, status_code):
+        current_app.logger.info(f"AuthError:")
+        current_app.logger.info(f"error:{error}")
+        current_app.logger.info(f"status_code:{status_code}")
         self.error = error
         self.status_code = status_code
 
@@ -23,7 +26,7 @@ class AuthError(Exception):
 ## Auth Header
 
 '''
-@TODO implement get_token_auth_header() method
+@DONE implement get_token_auth_header() method
     it should attempt to get the header from the request
         it should raise an AuthError if no header is present
     it should attempt to split bearer and the token
@@ -31,10 +34,38 @@ class AuthError(Exception):
     return the token part of the header
 '''
 def get_token_auth_header():
-   raise Exception('Not Implemented')
+    """Obtains the access token from the Authorization Header
+    """
+    auth = request.headers.get("Authorization", None)
+    if not auth:
+        current_app.logger.info("User didn't specify Authorization")
+        raise AuthError({"code": "authorization_header_missing",
+                        "description":
+                            "Authorization header is expected"}, 401)
+
+    parts = auth.split()
+
+    if parts[0].lower() != "bearer":
+        current_app.logger.info("no bearer in the given Authorization")
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Authorization header must start with"
+                            " Bearer"}, 401)
+    elif len(parts) == 1:
+        raise AuthError({"code": "invalid_header",
+                        "description": "Token not found"}, 401)
+    elif len(parts) > 2:
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Authorization header must be"
+                            " Bearer token"}, 401)
+
+    token = parts[1]
+    return token
+
 
 '''
-@TODO implement check_permissions(permission, payload) method
+@DONE implement check_permissions(permission, payload) method
     @INPUTS
         permission: string permission (i.e. 'post:drink')
         payload: decoded jwt payload
@@ -45,10 +76,21 @@ def get_token_auth_header():
     return true otherwise
 '''
 def check_permissions(permission, payload):
-    raise Exception('Not Implemented')
+    if 'permissions' not in payload:
+        raise AuthError({
+            'code': 'invalid_claims',
+            'description': 'Permissions are not included in the payload.'
+        }, 400)
+
+    if permission not in payload['permissions']:
+        raise AuthError({
+            'code': 'unauthorized',
+            'description': 'The user does not have a permission to use this method'
+        }, 401)
+    return True
 
 '''
-@TODO implement verify_decode_jwt(token) method
+@DONE implement verify_decode_jwt(token) method
     @INPUTS
         token: a json web token (string)
 
@@ -61,10 +103,63 @@ def check_permissions(permission, payload):
     !!NOTE urlopen has a common certificate error described here: https://stackoverflow.com/questions/50236117/scraping-ssl-certificate-verify-failed-error-for-http-en-wikipedia-org
 '''
 def verify_decode_jwt(token):
-    raise Exception('Not Implemented')
+    jsonurl = urlopen("https://"+AUTH0_DOMAIN+"/.well-known/jwks.json")
+    jwks = json.loads(jsonurl.read())
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        algor = unverified_header["alg"]
+        current_app.logger.info(f"unverified_header with algor:{algor}")
+    except jwt.JWTError:
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Invalid header. "
+                            "Use an RS256 signed JWT Access Token"}, 401)
+    if unverified_header["alg"] == "HS256":
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Invalid header. "
+                            "Use an RS256 signed JWT Access Token"}, 401)
+    rsa_key = {}
+    for key in jwks["keys"]:
+        if key["kid"] == unverified_header["kid"]:
+            rsa_key = {
+                "kty": key["kty"],
+                "kid": key["kid"],
+                "use": key["use"],
+                "n": key["n"],
+                "e": key["e"]
+            }
+    if rsa_key:
+        try:
+            payload = jwt.decode(
+                token,
+                rsa_key,
+                algorithms=ALGORITHMS,
+                audience=API_AUDIENCE,
+                issuer="https://"+AUTH0_DOMAIN+"/"
+            )
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise AuthError({"code": "token_expired",
+                            "description": "token is expired"}, 401)
+        except jwt.JWTClaimsError:
+            raise AuthError({"code": "invalid_claims",
+                            "description":
+                                "incorrect claims,"
+                                " please check the audience and issuer"}, 401)
+        except Exception:
+            raise AuthError({"code": "invalid_header",
+                            "description":
+                                "Unable to parse authentication"
+                                " token."}, 401)
+
+    raise AuthError({"code": "invalid_header",
+                    "description": "Unable to find appropriate key"}, 401)
+
+
 
 '''
-@TODO implement @requires_auth(permission) decorator method
+@DONE implement @requires_auth(permission) decorator method
     @INPUTS
         permission: string permission (i.e. 'post:drink')
 
@@ -77,9 +172,15 @@ def requires_auth(permission=''):
     def requires_auth_decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            token = get_token_auth_header()
-            payload = verify_decode_jwt(token)
-            check_permissions(permission, payload)
+            try:
+                token = get_token_auth_header()
+                current_app.logger.info(f"getting token:{token}")
+                payload = verify_decode_jwt(token)
+                current_app.logger.info(f"getting payload:{payload}")
+                result = check_permissions(permission, payload)
+                current_app.logger.info(f"Checkpermission reuturn:{result}")
+            except AuthError as e:
+                abort(e.status_code)
             return f(payload, *args, **kwargs)
 
         return wrapper
